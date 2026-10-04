@@ -1,0 +1,39 @@
+{
+  "manifest_version": 2,
+  "id": "maibot-no-games",
+  "name": "不打游戏",
+  "version": "1.0.0",
+  "description": "让麦麦会拒绝游戏邀约：群友约它打游戏时一律回绝，也不会主动邀约或承诺参与。在消息真正发出前检查它自己写的正文，命中邀约语义就拦下，同时放行它自己的拒绝话术（避免拒绝被自己拦掉、结果整句都不吭声）。",
+  "author": {
+    "name": "OWNER",
+    "url": "https://github.com/OWNER"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/OWNER/maibot-no-games",
+    "issues": "https://github.com/OWNER/maibot-no-games/issues"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "999999.0.0"
+  },
+  "sdk": {
+    "min_version": "2.5.0",
+    "max_version": "2.99.99"
+  },
+  "plugin_type": "extension",
+  "display": {
+    "icon": {
+      "type": "lucide",
+      "value": "shield-ban"
+    }
+  },
+  "capabilities": [],
+  "dependencies": [],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}
