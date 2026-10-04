@@ -42,7 +42,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, ClassVar, Optional, Tuple
+from functools import lru_cache
+from typing import Any, ClassVar
 
 from maibot_sdk import Field, HookHandler, MaiBotPlugin, PluginConfigBase
 
@@ -53,6 +54,12 @@ _LOG_TAG = "[不打游戏]"
 
 #: 内置规则集名称
 BUILTIN_RULE_SET = "游戏邀约"
+
+#: 日志里正文摘要的最大字数（完整原文只在 debug 级别出现）
+_LOG_EXCERPT_LIMIT = 120
+
+#: ``guard.action`` 的合法取值
+_VALID_ACTIONS = ("abort", "strip")
 
 # ── 组件类型 ────────────────────────────────────────────────────────────────
 # 这些组件不是麦麦自己说的话，直接跳过，不影响判定
@@ -136,28 +143,48 @@ _SENTENCE_SPLIT_LOOKBEHIND = r"(?<=[。！？!?…；;\n，,、])"
 
 
 # ── 基础工具 ────────────────────────────────────────────────────────────────
-def _compile(patterns: list[str]) -> list[Tuple[str, "re.Pattern[str]"]]:
-    """编译规则；单条写错只丢这一条，不影响其它规则。"""
+def _excerpt(text: str, limit: int = _LOG_EXCERPT_LIMIT) -> str:
+    """日志用的正文摘要：压缩空白并截断，避免把整段群聊写进日志文件。"""
 
-    compiled: list[Tuple[str, "re.Pattern[str]"]] = []
-    for pattern in patterns:
-        text = str(pattern or "").strip()
-        if not text:
-            continue
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return f"{flat[:limit]}…(+{len(flat) - limit}字)"
+
+
+@lru_cache(maxsize=64)
+def _compile_cached(
+    patterns: tuple[str, ...],
+) -> tuple[tuple[str, "re.Pattern[str]"], ...]:
+    """编译并缓存正则；同一组规则只编译一次（每条消息都会调用，必须缓存）。
+
+    单条正则写错只丢这一条并 warn 一次，不影响其它规则，也不阻断发送。
+    """
+
+    compiled: list[tuple[str, "re.Pattern[str]"]] = []
+    for text in patterns:
         try:
             compiled.append((text, re.compile(text, re.IGNORECASE)))
         except re.error as exc:
             logger.warning(f"{_LOG_TAG} 正则无效已跳过: {text!r} -> {exc}")
-    return compiled
+    return tuple(compiled)
 
 
-def _all_patterns(guard: "GuardSectionConfig") -> list[str]:
+def _compile(patterns: "list[str] | tuple[str, ...]") -> tuple[tuple[str, "re.Pattern[str]"], ...]:
+    """``_compile_cached`` 的列表入口（内部统一走缓存）。"""
+
+    return _compile_cached(
+        tuple(str(item or "").strip() for item in patterns if str(item or "").strip())
+    )
+
+
+def _all_patterns(guard: "GuardSectionConfig") -> tuple[str, ...]:
     """内置规则 + 用户追加的规则。"""
 
-    return _builtin_patterns() + list(guard.extra_patterns or [])
+    return tuple(_builtin_patterns()) + tuple(str(p or "").strip() for p in (guard.extra_patterns or []) if str(p or "").strip())
 
 
-def _collect_text_components(message: dict[str, Any]) -> Tuple[str, bool]:
+def _collect_text_components(message: dict[str, Any]) -> tuple[str, bool]:
     """提取麦麦自己写的正文。
 
     Args:
@@ -199,6 +226,15 @@ def _split_sentences(text: str) -> list[str]:
     return [segment for segment in re.split(_SENTENCE_SPLIT_LOOKBEHIND, text) if segment.strip()]
 
 
+@lru_cache(maxsize=32)
+def _refusal_rules_cached(
+    patterns: tuple[str, ...],
+) -> tuple[tuple[str, "re.Pattern[str]"], ...]:
+    """编译并缓存拒绝话术白名单（与禁止规则同样只编译一次）。"""
+
+    return _compile_cached(patterns)
+
+
 def _is_refusal(text: str, extra_patterns: list[str]) -> bool:
     """判断这段文本是「拒绝/推辞」还是「邀约」。
 
@@ -211,13 +247,12 @@ def _is_refusal(text: str, extra_patterns: list[str]) -> bool:
     """
 
     scrubbed = _ANOT_A_PATTERN.sub("", text)
-    for pattern in _REFUSAL_PATTERNS + list(extra_patterns or []):
-        try:
-            if re.search(pattern, scrubbed, re.IGNORECASE):
-                return True
-        except re.error:
-            continue
-    return False
+    if not scrubbed:
+        return False
+    patterns = tuple(_REFUSAL_PATTERNS) + tuple(
+        str(item or "").strip() for item in (extra_patterns or []) if str(item or "").strip()
+    )
+    return any(compiled.search(scrubbed) for _pattern, compiled in _refusal_rules_cached(patterns))
 
 
 # ── 配置模型 ────────────────────────────────────────────────────────────────
@@ -381,40 +416,54 @@ class NoGamesPlugin(MaiBotPlugin):
             return {"action": "continue"}
         if _is_refusal(text, guard.refusal_patterns):
             logger.info(
-                f"{_LOG_TAG} 它在拒绝，放行 stream={stream_id}（原命中 {hit[1]!r}）原文={text!r}"
+                f"{_LOG_TAG} 它在拒绝，放行 stream={stream_id} 命中片段={hit[1]!r} 摘要={_excerpt(text)}"
             )
+            logger.debug(f"{_LOG_TAG} 拒绝话术原文 stream={stream_id} 原文={text!r}")
             return {"action": "continue"}
         rule, matched = hit
 
         if guard.dry_run:
             logger.info(
-                f"{_LOG_TAG}[dry_run] 命中但放行 stream={stream_id} 规则={rule!r} 片段={matched!r} 原文={text!r}"
+                f"{_LOG_TAG}[dry_run] 命中但放行 stream={stream_id} 规则={rule!r} "
+                f"片段={matched!r} 长度={len(text)} 摘要={_excerpt(text)}"
             )
             return {"action": "continue"}
 
-        action = str(guard.action or "abort").strip().lower()
+        raw_action = str(guard.action or "abort").strip().lower()
+        action = raw_action if raw_action in _VALID_ACTIONS else "abort"
+        if action != raw_action:
+            logger.warning(
+                f"{_LOG_TAG} guard.action={raw_action!r} 非法（只支持 {'/'.join(_VALID_ACTIONS)}），已按 abort 处理"
+            )
+
         if action == "strip" and text_only:
             remain = self._strip(text, guard)
             if remain:
-                message["raw_message"] = [{"type": "text", "data": remain}]
+                # 不改入参：复制一份再替换，避免对宿主传入对象产生副作用
+                new_message = dict(message)
+                new_message["raw_message"] = [{"type": "text", "data": remain}]
                 modified_kwargs = dict(raw_kwargs)
                 modified_kwargs.update(
                     {
-                        "message": message,
+                        "message": new_message,
                         "stream_id": stream_id,
                         "processed_plain_text": processed_plain_text,
                     }
                 )
-                logger.info(f"{_LOG_TAG} 已删掉邀约句 stream={stream_id} 规则={rule!r} 剩余={remain!r}")
+                logger.info(
+                    f"{_LOG_TAG} 已删掉邀约句 stream={stream_id} 规则={rule!r} 剩余={_excerpt(remain)}"
+                )
                 return {"action": "continue", "modified_kwargs": modified_kwargs}
 
         logger.error(
-            f"{_LOG_TAG} 已拦下游戏邀约 stream={stream_id} 规则={rule!r} 片段={matched!r} 原文={text!r}"
+            f"{_LOG_TAG} 已拦下游戏邀约 stream={stream_id} 规则={rule!r} 片段={matched!r} "
+            f"长度={len(text)} 摘要={_excerpt(text)}"
         )
+        logger.debug(f"{_LOG_TAG} 被拦原文 stream={stream_id} 原文={text!r}")
         return {"action": "abort"}
 
     @staticmethod
-    def _match_raw(text: str, guard: GuardSectionConfig) -> Optional[Tuple[str, str]]:
+    def _match_raw(text: str, guard: GuardSectionConfig) -> tuple[str, str] | None:
         """只做模式匹配，返回第一个命中的 ``(规则, 命中片段)``。"""
 
         for keyword in guard.extra_keywords or []:
@@ -429,7 +478,7 @@ class NoGamesPlugin(MaiBotPlugin):
         return None
 
     @staticmethod
-    def _match(text: str, guard: GuardSectionConfig) -> Optional[Tuple[str, str]]:
+    def _match(text: str, guard: GuardSectionConfig) -> tuple[str, str] | None:
         """最终判定：命中禁止规则、且不是拒绝话术时才算违规。"""
 
         hit = NoGamesPlugin._match_raw(text, guard)

@@ -183,7 +183,56 @@ def run() -> int:
         failures.append(f"strip 结果异常: {remain!r}")
     print(f"  {'✅' if ok else '❌'} 剩余正文 = {remain!r}")
 
-    total = len(POSITIVE) + len(NEGATIVE) + len(STRUCTURE_CASES) + len(REFUSAL_CASES) + 1
+    print("\n新增行为：缓存 / 非法配置 / 无副作用 / 日志摘要")
+    print("-" * 66)
+
+    # 1) 正则编译缓存：重复判定不应重复编译
+    module._compile_cached.cache_clear()
+    first = plugin._match("走呗，上线开一把", guard)
+    info_after_first = module._compile_cached.cache_info()
+    for _ in range(20):
+        plugin._match("今天掉分掉麻了", guard)
+    info_after_many = module._compile_cached.cache_info()
+    ok = first is not None and info_after_many.misses == info_after_first.misses
+    if not ok:
+        failures.append("正则编译未命中缓存（每条消息重复编译）")
+    print(
+        f"  {'✅' if ok else '❌'} 编译缓存：misses {info_after_first.misses} -> {info_after_many.misses}"
+        f"（21 次判定只编译 {info_after_many.misses} 次）"
+    )
+
+    # 2) 非法 action 值：应回退 abort 并给出告警，不静默
+    bad_guard = module.GuardSectionConfig()
+    bad_guard.action = "block"
+    got = plugin._inspect(
+        {"raw_message": [{"type": "text", "data": "走呗，上线开一把"}]}, "s", "", {}
+    ).get("action")
+    ok = got == "abort"
+    if not ok:
+        failures.append(f"非法 action 未回退 abort，实际 {got}")
+    print(f"  {'✅' if ok else '❌'} 非法 action='block' -> 回退 {got}")
+
+    # 3) strip 模式不得修改入参
+    original = {"raw_message": [{"type": "text", "data": "今天掉分。走呗，上线开一把。"}]}
+    snapshot = [dict(c) for c in original["raw_message"]]
+    strip_guard = module.GuardSectionConfig()
+    strip_guard.action = "strip"
+    plugin._inspect(original, "s", "", {})
+    ok = original["raw_message"] == snapshot
+    if not ok:
+        failures.append("strip 模式修改了入参 message（应复制后再改）")
+    print(f"  {'✅' if ok else '❌'} strip 不改入参：{ok}")
+
+    # 4) 日志摘要：超长正文必须截断
+    long_text = "啊" * 500
+    short = module._excerpt("短句")
+    clipped = module._excerpt(long_text)
+    ok = short == "短句" and len(clipped) < len(long_text) and clipped.endswith("字)")
+    if not ok:
+        failures.append(f"日志摘要未正确截断: {clipped!r}")
+    print(f"  {'✅' if ok else '❌'} 日志摘要 500 字 -> {len(clipped)} 字符（{clipped[-12:]}）")
+
+    total = len(POSITIVE) + len(NEGATIVE) + len(STRUCTURE_CASES) + len(REFUSAL_CASES) + 5
     print("\n" + "=" * 66)
     if failures:
         print(f"存在 {len(failures)} 项未通过（共 {total} 项断言）：")
