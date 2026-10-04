@@ -1,3 +1,7 @@
+# 这是 config.toml 的**示例**（供你参考全部可调项）。
+# MaiBot 会在安装时按插件的 config_model 自动生成真实的 config.toml。
+# 你也可以把本文件复制为 config.toml 再改。
+
 # 不打游戏（maibot-no-games）· 配置
 #
 # 作用：在消息真正发出前检查麦麦自己写的正文，命中「游戏邀约」语义就拦下或删改，
@@ -6,7 +10,8 @@
 #       不会出现"拒绝被自己拦掉 → 整句都不吭声"。
 #
 # 日志关键字：[不打游戏]
-# 被拦下的消息在发送层会额外记一条「[SendService] 发送消息失败」，这是预期行为，不是故障。
+# 被拦下时，发送层会记一条 info：「[SendService] 消息 … 在构建后被 Hook 中止」，这是预期行为。
+# 注意与「[SendService] 发送消息失败」（error 级）区分：那条代表消息要发但没发出去，与本插件无关。
 
 # 基础设置
 [plugin]
@@ -18,7 +23,7 @@ name = "maibot_no_games"
 config_version = "1.0.0"
 
 # 插件版本；保持默认值即可
-version = "1.0.0"
+version = "1.1.0"
 
 # 是否启用插件；true 开启，false 关闭
 enabled = true

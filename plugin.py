@@ -28,9 +28,14 @@
 
 注意
 ----
-被拦下的消息，宿主发送层会额外记一条 ``[SendService] 发送消息失败`` 的 error 日志。
-这是**预期行为**（消息被主动取消），不是故障；本插件自己会打
-``[不打游戏] 已拦下…`` 的日志便于对照。
+被拦下时，宿主发送层会记一条 info 日志::
+
+    [SendService] 消息 {id} 在构建后被 Hook 中止
+
+随后该消息直接被丢弃、**不会进入发送流程**。这是**预期行为**（消息被主动取消），
+不是故障 —— 本插件自己会打 ``[不打游戏] 已拦下游戏邀约…`` 的 warning 日志便于对照。
+注意这与真正的发送失败（``[SendService] 发送消息失败``，error 级）是两件不同的事：
+后者代表消息要发但没发出去，与本插件无关。
 
 配置
 ----
@@ -98,23 +103,115 @@ def _builtin_patterns() -> list[str]:
         r"(一起|一块|一齐)(玩|打|来|开|搞|上号|开黑|组队|联机|上分|排位)",
         # 组队类名词（本身就是约玩）
         r"(开黑|组队|联机|双排|三排|四排|五排|上分|排位|下本|刷本|三缺一|四缺一)",
-        # 上号 / 上线（参与的信号）
-        r"(上号|上线|登号|上游戏|进游戏)",
-        # 来一把 / 打两把 / 开一局
+        # 上号 / 登号 / 进游戏（无歧义）；「上线」多义词，只认「现在/立刻/马上」这些
+        # 明确当下含义的搭配（"上线了 / 上线时间 / 版本上线" 属正常语境）
+        r"(现在|立刻|马上|待会|等会)(上|进|登)线",
+        r"(我|那|你|他)?(也)?(要|想|得|就)?(上号|登号|上游戏|进游戏)",
+        # 来一把 / 打两把 / 开一局 —— 通用动词组合，需游戏语境佐证（见 _GAME_HINT）
         r"(来|开|打|玩|整|搞)(一|两|几|三)?(把|局)",
-        # 求带 / 缺人
+        # 求带 / 缺人 —— 「算我一个」「带我一个」在非游戏语境极常见，需游戏语境
         r"(带带我|求带|带我一个|算我一个|缺人吗|缺不缺人|还差人吗)",
         # 等你 / 喊你 / 陪你 / 奉陪（承诺参与）
-        r"(等你上|等你来|喊你一起|叫你一起|拉你一起|喊你一声|陪你玩|陪你打|奉陪|打啥都|玩啥都|打什么都|玩什么都)",
-        # 承诺打某个位置
-        r"(我|我来|我打|我玩|我走)[^，。！？\s]{0,2}(打野|中单|上路|下路|辅助|射手|adc|上单)",
+        r"(等你上|等你来|等你上线|喊你一起|叫你一起|拉你一起|喊你一声|陪你玩|陪你打|奉陪|打啥都|玩啥都|打什么都|玩什么都)",
+        # 「我上线等你 / 那我上线等你」这类**承诺上线**，含明确的"等"或"先"义
+        r"(我|那|你)?(也)?(先|就)?(上|进)线(等|喊|叫|找)(你|我|他|大家)",
+        # 承诺打某个位置（位置词本身强指向游戏，无需额外语境）
+        r"(我|我来|我打|我玩|我走|我拿|我carry)[^，。！？\s]{0,2}(打野|中单|上路|下路|辅助|射手|adc|上单|ad|c)",
         # 开麦 / 连麦 / 语音喊你
         r"(开麦|连麦|语音喊你|语音叫你|语音开黑)",
         # 常见游戏名 + 约玩标记
         r"(一起|来|开|上号|上线|开黑|组队|双排|五排|带|走|整)[^，。！？\s]{0,3}(王者|吃鸡|三角洲|英雄联盟|lol|原神|和平精英|永劫无间|无畏契约|瓦罗兰特|csgo|cf)",
         # 游戏名 + 疑问邀约
         r"(打|玩|开)(王者|吃鸡|三角洲|英雄联盟|lol|原神|和平精英|永劫无间|无畏契约|瓦罗兰特|csgo|cf)[^，。！？\s]{0,4}(吗|不|呀|一起|来|去|走)",
+        # 游戏专有名词里的**场景/动作**信号：光出现即说明"正在谈论游戏"。
+        # ⚠️ 刻意不含「信誉分 / 段位 / 匹配 / 野区」这类**纯名词** ——
+        # 「我信誉分都要被你扣光了」「我段位掉了」是吐槽，不是邀约。
+        r"(这局|这把我|这一局|这盘|这场|开黑|组队|上号|联机|排位|上分|补刀|推塔|发育|铭文|出装)",
     ]
+
+
+#: 命中通用动词组合后的**旁证词**：必须是与命中片段不同的、独立的一处游戏信号。
+#:
+#: ⚠️ 不能把命中片段自己当旁证 ——「这游戏**开局**就崩了」里 `开局` 既是被命中的词
+#: 又是游戏词，自证无效。所以这里只收**真正指向"在玩游戏"**的术语与动作。
+#: 「游戏 / 这局 / 段位 / 信誉分」不收：那只能证明"在谈游戏"，
+#: 而「这游戏开局就崩了」「我信誉分都要被你扣光了」是纯吐槽，不是邀约。
+_GAME_HINT = re.compile(
+    r"(补刀|推塔|发育|出装|铭文|打野|中单|辅助|射手|上单|野区|龙坑|对局|匹配|"
+    r"位移|技能|平a|双杀|三杀|团灭|上分|排位|三缺一|四缺一|双排|三排|四排|五排|"
+    r"上号|上游戏|进游戏|登号|组队|联机|开黑|上线|"
+    r"王者|吃鸡|三角洲|英雄联盟|lol|原神|和平精英|永劫无间|无畏契约|瓦罗兰特|csgo|cf)"
+)
+
+
+
+#: 「来一把 / 开一局 / 求带 / 打位置」这类规则的标记片段——脱离游戏语境就是多义词。
+_GAME_AMBIGUOUS_MARKER = re.compile(r"(一|两|几|三)?(把|局)|算我一个|带我一个|缺人|我(来|打|玩|走|拿|carry)")
+
+
+def _needs_game_hint(pattern: str) -> bool:
+    """判断这条规则是否属于「通用动词组合」，需要额外确认。
+
+    命中即成立、无需确认的：
+    - 含游戏名的（「王者」「lol」「吃鸡」…）；
+    - 游戏专用量词与术语（「这局」「开黑」「上号」「补刀」「上分」…）——
+      这些词在非游戏语境里基本不出现。
+    需要确认的：那些**普通词**也能组成的组合
+    （「来把」「开局」「算我一个」「我玩辅助」「缺人」）。
+    """
+
+    if "王者" in pattern or "cf" in pattern:
+        return False
+    for strong in (
+        "这局", "这盘", "这场", "开黑", "上号", "联机", "排位", "上分",
+        "补刀", "推塔", "发育", "铭文", "出装", "三缺一", "双排", "下本", "刷本",
+    ):
+        if strong in pattern:
+            return False
+    return bool(_GAME_AMBIGUOUS_MARKER.search(pattern))
+
+
+#: 「组队 / 算我一个 / 带我一个 / 缺人」在现实活动里也常见（"算我一个，我搬桌子"）；
+#: 「来把」会被拆成「来 + 把(量词)」（"我来把椅子搬过来"）；「这局 / 开局」多为陈述与提问。
+#: 这些都是**固定误伤搭配**，出现时放行。
+_AMBIGUOUS_MISUSE = re.compile(
+    r"(我来把|来把(椅|桌|水|饭|门|窗|灯|书|纸|笔|伞|车|球|手|头|你|我)把)"
+    r"|(这|每)(局|盘|场|个游戏|款游戏|作)"
+    r"|(这游戏|游戏里|游戏这|游戏那)"
+    r"|(开局|这局|该局)[^，。！？]{0,6}(崩|卡|慢|烂|难|坑|无聊|不能|不好|闪退|报错|更新|修复|结束|完了)"
+    r"|(开局|这局|该局)(先|再|就|别|得|要)?(发育|团|推|补|打|走|蹲|支援|抢|守)"
+    r"|(算|带)我(一|两|三)?(个|们)?(，|,|。|！|、|$)"
+    r"|(报名|参赛|参加|公司|学校|社团|活动|比赛|竞赛|团建|拓展|部门|工会|小组)"
+)
+
+#: 命中片段里这些来源词才是"多义词"，需要检查误伤搭配。
+#: 游戏专用词（开黑 / 上号 / 补刀 / 上分 / 三缺一…）不在此列，不受影响。
+_MULTISENSE_SOURCE = re.compile(
+    r"(一|两|几|三)?(把|局)|算我一个|带我一个|缺人|组队|我(玩|打|走|来|拿|carry)"
+)
+
+
+def _is_ambiguous_misuse(text: str, pattern: str) -> bool:
+    """判断这次命中是否属于「多义词误伤」。
+
+    ``来一把`` / ``开一把`` / ``开局`` 本身**就是邀约动作**，命中即成立 —— 不要要求旁证，
+    否则「现在来一把补偿你」「开一把不」这些真邀约会全部漏放。
+    需要排除的只有下面这几类**固定误伤搭配**：
+
+    ================================ ==================================
+    误伤搭配                          实际含义
+    ================================ ==================================
+    「我来把椅子搬过来」                 「来」+「把(量词)」，动词被拆开
+    「这游戏开局就崩了」                 游戏术语的陈述用法
+    「这局我玩辅助位吗」                 在问自己位置，不是承诺参与
+    「算我一个，明天的评审我来做」          现实活动报名
+    「组队报名参加了公司比赛」             现实活动报名
+    ================================ ==================================
+    """
+
+    if not _MULTISENSE_SOURCE.search(pattern):
+        return False  # 命中片段本身不是多义词来源，不受影响
+    return bool(_AMBIGUOUS_MISUSE.search(text))
 
 
 # ── 拒绝话术白名单 ──────────────────────────────────────────────────────────
@@ -236,14 +333,19 @@ def _refusal_rules_cached(
 
 
 def _is_refusal(text: str, extra_patterns: list[str]) -> bool:
-    """判断这段文本是「拒绝/推辞」还是「邀约」。
+    """判断**这一句**是否是「拒绝/推辞」而不是「邀约」。
+
+    ⚠️ 必须**按句**调用。早先版本对整段正文做一次 ``search``，
+    于是「我不玩单机的，不过一起开黑也行」这种"先拒绝、后改口"的长回复
+    会被整体放行 —— 等于给拦截规则留了一个稳定后门。
+    现在只豁免拒绝词**所在的那一句**，同一段里的其它邀约句仍会被拦。
 
     Args:
-        text: 出站正文。
+        text: 单句正文（不含句末标点）。
         extra_patterns: 配置里追加的额外拒绝正则。
 
     Returns:
-        bool: 命中任一条拒绝规则则返回 ``True``（应放行）。
+        bool: 命中任一条拒绝规则则返回 ``True``（该句应放行）。
     """
 
     scrubbed = _ANOT_A_PATTERN.sub("", text)
@@ -404,28 +506,48 @@ class NoGamesPlugin(MaiBotPlugin):
             return {"action": "continue"}
 
         text, text_only = _collect_text_components(message)
+        used_plain_text_fallback = False
         if not text:
-            # 拿不到正文就退而用宿主的纯文本；此路径下不做结构改写
+            # 拿不到正文就退而用宿主的纯文本；此路径下不做结构改写。
+            # ⚠️ 这条兜底路径跳过了「只看它自己写的正文」铁律（该纯文本由宿主拼接，
+            # 是否含引用内容不由我们决定），因此这里偏保守：只在明确命中时拦。
             text = str(processed_plain_text or "").strip()
             text_only = False
+            used_plain_text_fallback = True
         if not text:
             return {"action": "continue"}
 
         hit = self._match_raw(text, guard)
         if hit is None:
             return {"action": "continue"}
-        if _is_refusal(text, guard.refusal_patterns):
+        rule, matched = hit
+
+        # ── 按句判定：拒绝词只豁免它所在的那一句 ──────────────────────────
+        # 找出所有"命中禁止规则"的句子，以及其中哪些是拒绝话术。
+        offending: list[str] = []
+        refusal_hit: str | None = None
+        for sentence in _split_sentences(text):
+            sent_hit = self._match_raw(sentence, guard)
+            if sent_hit is None:
+                continue
+            if _is_refusal(sentence, guard.refusal_patterns):
+                if refusal_hit is None:
+                    refusal_hit = sent_hit[1]
+                continue
+            offending.append(sentence)
+
+        if not offending:
+            # 命中的每一句都是拒绝话术 → 整条放行。
             logger.info(
-                f"{_LOG_TAG} 它在拒绝，放行 stream={stream_id} 命中片段={hit[1]!r} 摘要={_excerpt(text)}"
+                f"{_LOG_TAG} 它在拒绝，放行 stream={stream_id} 命中片段={matched!r} 摘要={_excerpt(text)}"
             )
             logger.debug(f"{_LOG_TAG} 拒绝话术原文 stream={stream_id} 原文={text!r}")
             return {"action": "continue"}
-        rule, matched = hit
 
         if guard.dry_run:
             logger.info(
                 f"{_LOG_TAG}[dry_run] 命中但放行 stream={stream_id} 规则={rule!r} "
-                f"片段={matched!r} 长度={len(text)} 摘要={_excerpt(text)}"
+                f"片段={matched!r} 违规句={len(offending)} 长度={len(text)} 摘要={_excerpt(text)}"
             )
             return {"action": "continue"}
 
@@ -438,7 +560,7 @@ class NoGamesPlugin(MaiBotPlugin):
 
         if action == "strip" and text_only:
             remain = self._strip(text, guard)
-            if remain:
+            if remain and remain != text:
                 # 不改入参：复制一份再替换，避免对宿主传入对象产生副作用
                 new_message = dict(message)
                 new_message["raw_message"] = [{"type": "text", "data": remain}]
@@ -447,24 +569,38 @@ class NoGamesPlugin(MaiBotPlugin):
                     {
                         "message": new_message,
                         "stream_id": stream_id,
-                        "processed_plain_text": processed_plain_text,
+                        # 同步改写后的纯文本，否则写入存储/记录的仍是含邀约的原文
+                        "processed_plain_text": remain,
                     }
                 )
                 logger.info(
-                    f"{_LOG_TAG} 已删掉邀约句 stream={stream_id} 规则={rule!r} 剩余={_excerpt(remain)}"
+                    f"{_LOG_TAG} 已删掉邀约句 stream={stream_id} 规则={rule!r} "
+                    f"删除={len(offending)} 句 剩余={_excerpt(remain)}"
                 )
                 return {"action": "continue", "modified_kwargs": modified_kwargs}
 
-        logger.error(
+        logger.warning(
             f"{_LOG_TAG} 已拦下游戏邀约 stream={stream_id} 规则={rule!r} 片段={matched!r} "
-            f"长度={len(text)} 摘要={_excerpt(text)}"
+            f"违规句={len(offending)} 长度={len(text)} 摘要={_excerpt(text)}"
         )
         logger.debug(f"{_LOG_TAG} 被拦原文 stream={stream_id} 原文={text!r}")
         return {"action": "abort"}
 
     @staticmethod
-    def _match_raw(text: str, guard: GuardSectionConfig) -> tuple[str, str] | None:
-        """只做模式匹配，返回第一个命中的 ``(规则, 命中片段)``。"""
+    def _match_raw(
+        text: str,
+        guard: GuardSectionConfig,
+        strict: bool = True,
+    ) -> tuple[str, str] | None:
+        """只做模式匹配，返回第一个命中的 ``(规则, 命中片段)``。
+
+        Args:
+            text: 待检查的正文（整段或单句）。
+            guard: 拦截配置。
+            strict: 为 True（默认）时，命中「来一把 / 开一局 / 算我一个 / 我玩辅助」
+                这类通用动词组合，还必须在**同一段文本**里出现游戏线索才算数。
+                关掉它等于关闭多义词守卫，只在调试规则本身时用。
+        """
 
         for keyword in guard.extra_keywords or []:
             word = str(keyword or "").strip()
@@ -473,28 +609,29 @@ class NoGamesPlugin(MaiBotPlugin):
 
         for pattern, compiled in _compile(_all_patterns(guard)):
             match = compiled.search(text)
-            if match is not None:
-                return pattern, match.group(0)
+            if match is None:
+                continue
+            if strict and _is_ambiguous_misuse(text, pattern):
+                continue
+            return pattern, match.group(0)
         return None
 
     @staticmethod
-    def _match(text: str, guard: GuardSectionConfig) -> tuple[str, str] | None:
-        """最终判定：命中禁止规则、且不是拒绝话术时才算违规。"""
-
-        hit = NoGamesPlugin._match_raw(text, guard)
-        if hit is None or _is_refusal(text, guard.refusal_patterns):
-            return None
-        return hit
-
-    @staticmethod
     def _strip(text: str, guard: GuardSectionConfig) -> str:
-        """删掉包含命中内容的句子，返回剩余文本（保留原有标点）。"""
+        """删掉包含邀约的句子，返回剩余文本（保留原有标点）。
+
+        拒绝话术所在的句子**保留** —— 麦麦的拒绝正是这个插件要让它说出来的东西。
+        """
 
         patterns = _compile(_all_patterns(guard))
         keywords = [str(word).strip() for word in (guard.extra_keywords or []) if str(word).strip()]
+        refusals = tuple(guard.refusal_patterns or [])
         remain_parts: list[str] = []
         for sentence in _split_sentences(text):
             if any(word in sentence for word in keywords):
+                continue
+            if _is_refusal(sentence, refusals):
+                remain_parts.append(sentence)
                 continue
             if any(compiled.search(sentence) for _pattern, compiled in patterns):
                 continue

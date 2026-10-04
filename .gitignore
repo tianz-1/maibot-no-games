@@ -7,6 +7,10 @@ __pycache__/
 data/
 logs/
 
+# SDK 官方指引：插件源码仓库以 config_model 为配置定义，
+# config.toml 由 Runner 在安装时生成和维护，不应提交（它还会记录用户的本地设置）
+/config.toml
+
 # 本地备份与临时文件
 *.bak
 *.bak-wb-*
